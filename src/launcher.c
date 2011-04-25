@@ -32,6 +32,12 @@
 
 #include "wmfs.h"
 
+static int
+fts_alphasort(const FTSENT **a, const FTSENT **b)
+{
+     return (strcmp((*a)->fts_name, (*b)->fts_name));
+}
+
 /*
  * Just search command in PATH.
  * Return the characters to complete the command.
@@ -39,52 +45,60 @@
 static char *
 complete_on_command(char *start, size_t hits)
 {
-     char *path;
-     char *dirname;
-     char *ret = NULL;
-     DIR *dir;
-     struct dirent *content;
+     char **paths, *path, *p, **namelist = NULL, *ret = NULL;
+     int count, i;
+     FTS *tree;
+     FTSENT *node;
 
-     char **namelist = NULL;
-     int n = 0, i;
+     if (!(path = getenv("PATH")) || !start || hits <= 0)
+          return NULL;
 
-     if (!getenv("PATH") || !start || hits <= 0)
-         return NULL;
+     /* split PATH into paths */
+     path = p = xstrdup(path);
 
-     path = xstrdup(getenv("PATH"));
-     dirname = strtok(path, ":");
+     for (count = 1, p = path; strchr(p, ':') != NULL; p++, count++);
 
-     /* recursively open PATH */
-     while (dirname != NULL)
-     {
-          if ((dir = opendir(dirname)))
-          {
-               while ((content = readdir(dir)))
-               {
-                    if(strncmp(content->d_name, ".", 1))
-                    {
-                         if (!strncmp(content->d_name, start, strlen(start)))
-                         {
-                              namelist = xrealloc(namelist, ++n, sizeof(*namelist));
-                              namelist[n-1] = xstrdup(content->d_name);
-                         }
-                    }
-               }
-               closedir(dir);
-          }
-          dirname = strtok(NULL, ":");
+     paths = xcalloc(count, sizeof(*paths));
+
+     for (paths[0] = p = path, count = 1; (p = strchr(p, ':')) != NULL; p++, count++) {
+          paths[count] = p+1;
+          *p = '\0';
+     }
+     paths[count] = NULL;
+
+     if ((tree = fts_open(paths, FTS_NOCHDIR, fts_alphasort)) == NULL) {
+          warn("fts_open");
+          free(paths);
+          free(path);
+          return NULL;
      }
 
+     count = 0;
+     while ((node = fts_read(tree)) != NULL) {
+
+          if (node->fts_level > 0)
+               fts_set(tree, node, FTS_SKIP);
+
+          if (node->fts_level != 0 &&
+                    node->fts_info & FTS_F &&
+                    node->fts_info & FTS_NS &&
+                    (node->fts_statp->st_mode & S_IXOTH) != 0 &&
+                    strncmp(node->fts_name, start, strlen(start)) == 0) {
+               namelist = xrealloc(namelist, ++count, sizeof(*namelist));
+               namelist[count-1] = xstrdup(node->fts_name);
+          }
+     }
+
+     if (fts_close(tree))
+          warn("fts_close");
+
+     free(paths);
      free(path);
 
-     if(n > 0)
-     {
-          qsort(namelist, n, sizeof(char *), qsort_string_compare);
-          ret = xstrdup(namelist[((hits > 0) ? hits - 1 : 0) % n] + strlen(start));
-
-          for(i = 0; i < n; i++)
+     if (count) {
+          ret = xstrdup(namelist[((hits > 0) ? hits - 1 : 0) % count] + strlen(start));
+          for (i = 0; i < count; i++)
                free(namelist[i]);
-
           free(namelist);
      }
 

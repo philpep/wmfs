@@ -52,6 +52,7 @@
 #include <pthread.h>
 #include <locale.h>
 #include <sys/queue.h>
+#include <fts.h>
 #include <sys/select.h>
 #include <sys/types.h>
 #include <sys/wait.h>
