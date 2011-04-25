@@ -117,6 +117,7 @@ complete_on_files(char *start, size_t hits)
      char *dirname = NULL;
      char *path = NULL;
      char *filepath = NULL;
+     char *home;
      DIR *dir = NULL;
      struct dirent *content = NULL;
      struct stat st;
@@ -133,9 +134,13 @@ complete_on_files(char *start, size_t hits)
           path = xstrdup(".");
      else
      {
+
+          if (!(home = getenv("HOME")))
+               return NULL;
+
           /* remplace ~ by $HOME in dirname */
-          if (!strncmp(p, "~/", 2) && getenv("HOME"))
-               xasprintf(&dirname, "%s%s", getenv("HOME"), p+1);
+          if (!strncmp(p, "~/", 2) && home)
+               xasprintf(&dirname, "%s%s", home, p+1);
           else
                dirname = xstrdup(p);
 
