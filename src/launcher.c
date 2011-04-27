@@ -112,16 +112,10 @@ complete_on_command(char *start, size_t hits)
 static char *
 complete_on_files(char *start, size_t hits)
 {
-     char *ret = NULL;
-     char *p = NULL;
-     char *dirname = NULL;
-     char *path = NULL;
-     char *filepath = NULL;
-     char *home;
-     DIR *dir = NULL;
-     struct dirent *content = NULL;
-     struct stat st;
-     size_t count = 0;
+     char *p, *home, *ret = NULL, *path, *dirname = NULL, *paths[2], **namelist = NULL;
+     int count, i;
+     FTS *tree;
+     FTSENT *node;
 
      if (!start || hits <= 0 || !(p = strrchr(start, ' ')))
           return NULL;
@@ -162,34 +156,38 @@ complete_on_files(char *start, size_t hits)
           }
      }
 
-     if ((dir = opendir(path)))
+     paths[0] = path;
+     paths[1] = NULL;
+
+     if ((tree = fts_open(paths, FTS_NOCHDIR, fts_alphasort)) == NULL)
      {
-          while ((content = readdir(dir)))
-          {
-               if (!strcmp(content->d_name, ".") || !strcmp(content->d_name, ".."))
-                    continue;
-               if (!strncmp(content->d_name, p, strlen(p)) && ++count == hits)
-               {
-                    /* If it's a directory append '/' to the completion */
-                    xasprintf(&filepath, "%s/%s", path, content->d_name);
-
-                    if (filepath && stat(filepath, &st) != -1)
-                    {
-                         if (S_ISDIR(st.st_mode))
-                              xasprintf(&ret, "%s/", content->d_name + strlen(p));
-                         else
-                              ret = xstrdup(content->d_name + strlen(p));
-                    }
-                    else
-                         warn("%s", filepath);
-
-                    free(filepath);
-
-                    break;
-               }
-          }
-          closedir(dir);
+          warn("fts_open");
+          free(dirname);
+          free(path);
+          return NULL;
      }
+
+     count = 0;
+     while ((node = fts_read(tree)) != NULL) {
+          if (node->fts_level > 0)
+               fts_set(tree, node, FTS_SKIP);
+
+          if (node->fts_level != 0 &&
+                    strncmp(node->fts_name, p, strlen(p)) == 0) {
+               namelist = xrealloc(namelist, ++count, sizeof(*namelist));
+               namelist[count-1] = xstrdup(node->fts_name + strlen(p));
+          }
+     }
+
+     if (count) {
+          ret = xstrdup(namelist[((hits > 0) ? hits - 1 : 0) % count]);
+          for (i = 0; i < count; i++)
+               free(namelist[i]);
+          free(namelist);
+     }
+
+     if (fts_close(tree))
+          warn("fts_close");
 
      free(dirname);
      free(path);
