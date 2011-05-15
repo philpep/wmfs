@@ -32,6 +32,12 @@
 
 #include "wmfs.h"
 
+struct Complete_cache {
+     char *start;
+     char **namelist;
+     size_t hits;
+};
+
 static int
 fts_alphasort(const FTSENT **a, const FTSENT **b)
 {
@@ -42,15 +48,15 @@ fts_alphasort(const FTSENT **a, const FTSENT **b)
  * Just search command in PATH.
  * Return the characters to complete the command.
  */
-static char *
-complete_on_command(char *start, size_t hits)
+static char **
+complete_on_command(char *start)
 {
-     char **paths, *path, *p, **namelist = NULL, *ret = NULL;
-     int count, i;
+     char **paths, *path, *p, **namelist = NULL;
+     int count;
      FTS *tree;
      FTSENT *node;
 
-     if (!(path = getenv("PATH")) || !start || hits <= 0)
+     if (!(path = getenv("PATH")) || !start)
           return NULL;
 
      /* split PATH into paths */
@@ -85,8 +91,13 @@ complete_on_command(char *start, size_t hits)
                     (node->fts_statp->st_mode & S_IXOTH) != 0 &&
                     strncmp(node->fts_name, start, strlen(start)) == 0) {
                namelist = xrealloc(namelist, ++count, sizeof(*namelist));
-               namelist[count-1] = xstrdup(node->fts_name);
+               namelist[count-1] = xstrdup(node->fts_name + strlen(start));
           }
+     }
+
+     if (count) {
+          namelist = xrealloc(namelist, ++count, sizeof(*namelist));
+          namelist[count-1] = NULL;
      }
 
      if (fts_close(tree))
@@ -95,36 +106,28 @@ complete_on_command(char *start, size_t hits)
      free(paths);
      free(path);
 
-     if (count) {
-          ret = xstrdup(namelist[((hits > 0) ? hits - 1 : 0) % count] + strlen(start));
-          for (i = 0; i < count; i++)
-               free(namelist[i]);
-          free(namelist);
-     }
-
-     return ret;
+     return namelist;
 }
 
 /*
  * Complete a filename or directory name.
  * works like complete_on_command.
  */
-static char *
-complete_on_files(char *start, size_t hits)
+static char **
+complete_on_files(char *start)
 {
-     char *p, *home, *ret = NULL, *path, *dirname = NULL, *paths[2], **namelist = NULL;
-     int count, i;
+     char *p, *home, *path, *dirname = NULL, *paths[2], **namelist = NULL;
+     int count;
      FTS *tree;
      FTSENT *node;
 
-     if (!start || hits <= 0 || !(p = strrchr(start, ' ')))
-          return NULL;
+     p = start;
 
      /*
       * Search the directory to open and set
       * the beginning of file to complete on pointer 'p'.
       */
-     if (*(++p) == '\0' || !strrchr(p, '/'))
+     if (*(p) == '\0' || !strrchr(p, '/'))
           path = xstrdup(".");
      else
      {
@@ -180,10 +183,8 @@ complete_on_files(char *start, size_t hits)
      }
 
      if (count) {
-          ret = xstrdup(namelist[((hits > 0) ? hits - 1 : 0) % count]);
-          for (i = 0; i < count; i++)
-               free(namelist[i]);
-          free(namelist);
+          namelist = xrealloc(namelist, ++count, sizeof(*namelist));
+          namelist[count-1] = NULL;
      }
 
      if (fts_close(tree))
@@ -192,7 +193,61 @@ complete_on_files(char *start, size_t hits)
      free(dirname);
      free(path);
 
-     return ret;
+     return namelist;
+}
+
+static void
+complete_cache_free(struct Complete_cache *cache)
+{
+     int i;
+
+     /* release memory */
+     free(cache->start);
+
+     if (cache->namelist) {
+          for (i = 0; cache->namelist[i]; i++)
+               free(cache->namelist[i]);
+          free(cache->namelist);
+     }
+
+     /* init */
+     cache->hits = 0;
+     cache->start = NULL;
+     cache->namelist = NULL;
+}
+
+static char *
+complete(struct Complete_cache *cache, char *start)
+{
+     char *p = NULL, *comp = NULL;
+
+     if (!start || !cache)
+          return NULL;
+
+     if ((p = strrchr(start, ' ')))
+          p++;
+     else
+          p = start;
+
+     if (cache->start && strcmp(cache->start, start) == 0) {
+          if (cache->namelist && !cache->namelist[cache->hits])
+               cache->hits = 0;
+     }
+     else {
+
+          complete_cache_free(cache);
+          cache->start = xstrdup(start);
+
+          if (p == start)
+               cache->namelist = complete_on_command(p);
+          else
+               cache->namelist = complete_on_files(p);
+     }
+
+     if (cache->namelist && cache->namelist[cache->hits])
+          comp = cache->namelist[cache->hits];
+
+     return comp;
 }
 
 static void
@@ -205,11 +260,11 @@ launcher_execute(Launcher *launcher)
      char tmp[32] = { 0 };
      char buf[512] = { 0 };
      char tmpbuf[512] = { 0 };
-     char *complete;
+     char *end;
      int i, pos = 0, histpos = 0, x, w;
-     int tabhits = 0;
      KeySym ks;
      XEvent ev;
+     struct Complete_cache cache = {NULL, NULL, 0};
 
      screen_get_sel();
 
@@ -312,35 +367,25 @@ launcher_execute(Launcher *launcher)
                      */
                     buf[pos] = '\0';
                     if (lastwastab)
-                         tabhits++;
+                         cache.hits++;
                     else
                     {
-                         tabhits = 1;
+                         cache.hits = 0;
                          strncpy(tmpbuf, buf, sizeof(tmpbuf));
                     }
 
 
-                    if (pos)
-                    {
-                         if (strchr(tmpbuf, ' '))
-                              complete = complete_on_files(tmpbuf, tabhits);
-                         else
-                              complete = complete_on_command(tmpbuf, tabhits);
-
-                         if (complete)
-                         {
-                              strncpy(buf, tmpbuf, sizeof(buf));
-                              strncat(buf, complete, sizeof(buf));
-                              found = True;
-                              free(complete);
-                         }
+                    if (pos && (end = complete(&cache, tmpbuf))) {
+                         strncpy(buf, tmpbuf, sizeof(buf));
+                         strncat(buf, end, sizeof(buf));
+                         found = True;
                     }
 
                     lastwastab = True;
 
                     /* start a new round of tabbing */
                     if (found == False)
-                         tabhits = 0;
+                         cache.hits = 0;
 
                     pos = strlen(buf);
 
@@ -380,6 +425,7 @@ launcher_execute(Launcher *launcher)
      barwin_unmap(bw);
      barwin_delete(bw);
      infobar_draw(&infobar[selscreen]);
+     complete_cache_free(&cache);
 
      XUngrabKeyboard(dpy, CurrentTime);
 
